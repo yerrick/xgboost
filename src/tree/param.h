@@ -10,7 +10,7 @@
 #include <vector>
 #include <cstring>
 #include <cmath>
-
+#include <unordered_set>
 namespace xgboost {
 namespace tree {
 
@@ -22,6 +22,8 @@ struct TrainParam : public dmlc::Parameter<TrainParam> {
   float min_split_loss;
   // maximum depth of a tree
   int max_depth;
+  //
+  int min_sample_num;
   //----- the rest parameters are less important ----
   // minimum amount of hessian(weight) allowed in a child
   float min_child_weight;
@@ -63,6 +65,8 @@ struct TrainParam : public dmlc::Parameter<TrainParam> {
         .describe("Minimum loss reduction required to make a further partition.");
     DMLC_DECLARE_FIELD(max_depth).set_lower_bound(0).set_default(6)
         .describe("Maximum depth of the tree.");
+    DMLC_DECLARE_FIELD(min_sample_num).set_lower_bound(1).set_default(10)
+        .describe("Minimum num in the leaf of the tree.");
     DMLC_DECLARE_FIELD(min_child_weight).set_lower_bound(0.0f).set_default(1.0f)
         .describe("Minimum sum of instance weight(hessian) needed in a child.");
     DMLC_DECLARE_FIELD(reg_lambda).set_lower_bound(0.0f).set_default(1.0f)
@@ -262,6 +266,11 @@ struct GradStats {
   }
 };
 
+
+
+
+
+
 /*!
  * \brief statistics that is helpful to store
  *   and represent a split solution for the tree
@@ -337,6 +346,107 @@ struct SplitEntry {
     return (sindex >> 31) != 0;
   }
 };
+
+
+
+
+/*! \brief core statistics used for tree construction */
+struct GradStatsMse {
+  /*! \brief sum gradient statistics */
+  double sum_grad;
+  double sum_grad2;
+  /*! \brief sum hessian statistics */
+  double sum_hess;
+  long sum_num;
+  // std::vector<double> graditems;
+
+  /*!
+   * \brief whether this is simply statistics and we only need to call
+   *   Add(gpair), instead of Add(gpair, info, ridx)
+   */
+  static const int kSimpleStats = 1;
+  /*! \brief constructor, the object must be cleared during construction */
+  explicit GradStatsMse(const TrainParam& param) {
+    this->Clear();
+  }
+  /*! \brief clear the statistics */
+  inline void Clear() {
+    sum_num = 0;
+    sum_grad2 = sum_grad = sum_hess = 0.0f;
+    // graditems.clear();
+  }
+  /*! \brief check if necessary information is ready */
+  inline static void CheckInfo(const MetaInfo& info) {
+  }
+  /*!
+   * \brief accumulate statistics
+   * \param p the gradient pair
+   */
+  inline void Add(bst_gpair p) {
+    this->Add(p.grad, p.hess, p.grad*p.grad, 1);
+  }
+  /*!
+   * \brief accumulate statistics, more complicated version
+   * \param gpair the vector storing the gradient statistics
+   * \param info the additional information
+   * \param ridx instance index of this instance
+   */
+  inline void Add(const std::vector<bst_gpair>& gpair,
+                  const MetaInfo& info,
+                  bst_uint ridx) {
+    const bst_gpair& b = gpair[ridx];
+    this->Add(b.grad, b.hess, b.grad*b.grad, 1);
+  }
+  /*! \brief calculate leaf weight */
+  inline double CalcWeight(const TrainParam& param) const {
+    // return param.CalcWeight(sum_grad, sum_hess);
+    double dw = -sum_grad / (sum_hess + param.reg_lambda);
+    // std::cout<<param.reg_lambda<<" "<<sum_hess<<" "<<dw<<std::endl;
+    return dw;
+    // return sum_num;
+  }
+  /*! \brief calculate gain of the solution */
+  inline double CalcGain(const TrainParam& param) const {
+    // return param.CalcGain(sum_grad, sum_hess);
+    double Ex = (sum_grad/sum_num);
+    double Ex2 = (sum_grad2/sum_num);
+    return (Ex2 - Ex*Ex);
+  }
+  /*! \brief add statistics to the data */
+  inline void Add(const GradStatsMse& b) {
+    this->Add(b.sum_grad, b.sum_hess, b.sum_grad2, b.sum_num);
+  }
+  /*! \brief same as add, reduce is used in All Reduce */
+  inline static void Reduce(GradStatsMse& a, const GradStatsMse& b) { // NOLINT(*)
+    a.Add(b);
+  }
+  /*! \brief set current value to a - b */
+  inline void SetSubstract(const GradStatsMse& a, const GradStatsMse& b) {
+    sum_grad = a.sum_grad - b.sum_grad;
+    sum_hess = a.sum_hess - b.sum_hess;
+    sum_grad2 = a.sum_grad2-b.sum_grad2;
+    sum_num = a.sum_num - b.sum_num;
+    return;
+  }
+  /*! \return whether the statistics is not used yet */
+  inline bool Empty() const {
+    return sum_hess == 0.0;
+  }
+  /*! \brief set leaf vector value based on statistics */
+  inline void SetLeafVec(const TrainParam& param, bst_float *vec) const {
+  }
+  // constructor to allow inheritance
+  GradStatsMse() {}
+  /*! \brief add statistics to the data */
+  inline void Add(double grad,  double hess, double grad2, long num) {
+    sum_grad += grad; sum_hess += hess;
+    sum_grad2 += grad2; sum_num+=num;
+    // graditems.push_back(grad);
+  }
+};
+
+
+
 
 }  // namespace tree
 }  // namespace xgboost

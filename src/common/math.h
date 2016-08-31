@@ -102,6 +102,14 @@ inline static bool CmpSecond(const std::pair<float, unsigned> &a,
                              const std::pair<float, unsigned> &b) {
   return a.second > b.second;
 }
+inline static bool CmpFirstFlt(const std::pair<float, float> &a,
+                            const std::pair<float, float> &b) {
+  return a.first > b.first;
+}
+inline static bool CmpSecondFlt(const std::pair<float, float> &a,
+                             const std::pair<float, float> &b) {
+  return a.second > b.second;
+}
 
 #if XGBOOST_STRICT_R_MODE
 // check nan

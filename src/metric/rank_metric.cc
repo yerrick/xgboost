@@ -9,7 +9,7 @@
 #include <cmath>
 #include "../common/sync.h"
 #include "../common/math.h"
-
+#include <iostream>
 namespace xgboost {
 namespace metric {
 // tag the this file, used by force static link later.
@@ -277,6 +277,8 @@ struct EvalNDCG : public EvalRankList{
   }
 };
 
+
+
 /*! \brief Mean Average Precision at N, for both classification and rank */
 struct EvalMAP : public EvalRankList {
  public:
@@ -308,6 +310,156 @@ struct EvalMAP : public EvalRankList {
   }
 };
 
+
+
+
+
+// ============================= YL add below     ===============================
+/*! \brief Evaluate rank list */
+struct EvalRankListFlt : public Metric {
+ public:
+  float Eval(const std::vector<float> &preds,
+             const MetaInfo &info,
+             bool distributed) const override {
+    CHECK_EQ(preds.size(), info.labels.size())
+        << "label size predict size not match";
+    // quick consistency when group is not available
+    std::vector<unsigned> tgptr(2, 0);
+    tgptr[1] = static_cast<unsigned>(preds.size());
+    const std::vector<unsigned> &gptr = info.group_ptr.size() == 0 ? tgptr : info.group_ptr;
+    CHECK_NE(gptr.size(), 0) << "must specify group when constructing rank file";
+    CHECK_EQ(gptr.back(), preds.size())
+        << "EvalRanklist: group structure must match number of prediction";
+    const bst_omp_uint ngroup = static_cast<bst_omp_uint>(gptr.size() - 1);
+    // sum statistics
+    double sum_metric = 0.0f;
+    #pragma omp parallel reduction(+:sum_metric)
+    {
+      // each thread takes a local rec
+      std::vector< std::pair<float, float> > rec;
+      #pragma omp for schedule(static)
+      for (bst_omp_uint k = 0; k < ngroup; ++k) {
+        rec.clear();
+        for (unsigned j = gptr[k]; j < gptr[k + 1]; ++j) {
+          rec.push_back(std::make_pair(preds[j], static_cast<float>(info.labels[j])));
+        }
+        sum_metric += this->EvalMetric(rec);
+      }
+    }
+    if (distributed) {
+      float dat[2];
+      dat[0] = static_cast<float>(sum_metric);
+      dat[1] = static_cast<float>(ngroup);
+      // approximately estimate the metric using mean
+      rabit::Allreduce<rabit::op::Sum>(dat, 2);
+      return dat[0] / dat[1];
+    } else {
+      return static_cast<float>(sum_metric) / ngroup;
+    }
+  }
+  const char* Name() const override {
+    return name_.c_str();
+  }
+
+ protected:
+  explicit EvalRankListFlt(const char* name, const char* param) {
+    using namespace std;  // NOLINT(*)
+    minus_ = false;
+    if (param != nullptr) {
+      std::ostringstream os;
+      os << name << '@' << param;
+      name_ = os.str();
+      if (sscanf(param, "%u[-]?", &topn_) != 1) {
+        topn_ = std::numeric_limits<unsigned>::max();
+      }
+      if (param[strlen(param) - 1] == '-') {
+        minus_ = true;
+      }
+    } else {
+      topn_ = std::numeric_limits<unsigned>::max();
+    }
+  }
+  /*! \return evaluation metric, given the pair_sort record, (pred,label) */
+  virtual float EvalMetric(std::vector<std::pair<float, float> > &pair_sort) const = 0; // NOLINT(*)
+
+ protected:
+  unsigned topn_;
+  std::string name_;
+  bool minus_;
+};
+
+
+/*! \brief NDCG: Normalized Discounted Cumulative Gain at N */
+struct EvalYL : public EvalRankListFlt{
+ public:
+  explicit EvalYL(const char *name) : EvalRankListFlt("yl", name) {}
+
+ protected:
+  inline float CalcDCG(const std::vector<std::pair<float, float> > &rec) const {
+    double sumdcg = 0.0;
+    for (size_t i = 0; i < rec.size() && i < this->topn_; ++i) {
+      const float rel = rec[i].second;
+      if (rel != 0) {
+        sumdcg += rel / std::log2(i + 2.0);
+      }
+    }
+    return static_cast<float>(sumdcg);
+  }
+  virtual float EvalMetric(std::vector<std::pair<float, float> > &rec) const { // NOLINT(*)
+    std::stable_sort(rec.begin(), rec.end(), common::CmpFirstFlt);
+    float dcg = this->CalcDCG(rec);
+    std::stable_sort(rec.begin(), rec.end(), common::CmpSecondFlt);
+    float idcg = this->CalcDCG(rec);
+    if (idcg == 0.0f) {
+      if (minus_) {
+        return 0.0f;
+      } else {
+        return 1.0f;
+      }
+    }
+    // std::cout<<dcg/idcg<<" "<<rec.size()<<std::endl;
+    // for(int i=0;i<this->topn_;i++)
+    // {
+    //   std::cout<<"rec[i].second ==" <<rec[i].second<<std::endl;
+    // }
+    return dcg/idcg;
+  }
+};
+
+/*! \brief NDCG: Normalized Discounted Cumulative Gain at N */
+struct EvalTopSum : public EvalRankListFlt{
+ public:
+  explicit EvalTopSum(const char *name) : EvalRankListFlt("topsum", name) {}
+
+ protected:
+  inline float CalcDCG(const std::vector<std::pair<float, float> > &rec) const {
+    double sumdcg = 0.0;
+    for (size_t i = 0; i < rec.size() && i < this->topn_; ++i) {
+      const float rel = rec[i].second;
+      if (rel != 0) {
+        sumdcg += rel;
+      }
+    }
+    return static_cast<float>(sumdcg);
+  }
+  virtual float EvalMetric(std::vector<std::pair<float, float> > &rec) const { // NOLINT(*)
+    std::stable_sort(rec.begin(), rec.end(), common::CmpFirst);
+    float dcg = this->CalcDCG(rec);
+    return dcg/this->topn_;
+    // std::stable_sort(rec.begin(), rec.end(), common::CmpSecond);
+    // float idcg = this->CalcDCG(rec);
+    // if (idcg == 0.0f) {
+    //   if (minus_) {
+    //     return 0.0f;
+    //   } else {
+    //     return 1.0f;
+    //   }
+    // }
+    // return dcg/idcg;
+  }
+};
+
+
 XGBOOST_REGISTER_METRIC(AMS, "ams")
 .describe("AMS metric for higgs.")
 .set_body([](const char* param) { return new EvalAMS(param); });
@@ -327,5 +479,14 @@ XGBOOST_REGISTER_METRIC(NDCG, "ndcg")
 XGBOOST_REGISTER_METRIC(MAP, "map")
 .describe("map@k for rank.")
 .set_body([](const char* param) { return new EvalMAP(param); });
+
+XGBOOST_REGISTER_METRIC(YL, "yl")
+.describe("yl@k for rank.")
+.set_body([](const char* param) { return new EvalYL(param); });
+
+XGBOOST_REGISTER_METRIC(TopSum, "topsum")
+.describe("topsum@k for rank.")
+.set_body([](const char* param) { return new EvalTopSum(param); });
+
 }  // namespace metric
 }  // namespace xgboost
