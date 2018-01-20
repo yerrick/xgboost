@@ -15,7 +15,7 @@ from . import callback
 def _train_internal(params, dtrain,
                     num_boost_round=10, evals=(),
                     obj=None, feval=None,
-                    xgb_model=None, callbacks=None):
+                    xgb_model=None, callbacks=None,eval_period=1):
     """internal training function"""
     callbacks = [] if callbacks is None else callbacks
     evals = list(evals)
@@ -80,7 +80,7 @@ def _train_internal(params, dtrain,
         nboost += 1
         evaluation_result_list = []
         # check evaluation result.
-        if len(evals) != 0:
+        if len(evals) != 0 and (i%eval_period)==0:
             bst_eval_set = bst.eval_set(evals, i, feval)
             if isinstance(bst_eval_set, STRING_TYPES):
                 msg = bst_eval_set
@@ -201,7 +201,7 @@ def train(params, dtrain, num_boost_round=10, evals=(), obj=None, feval=None,
                            num_boost_round=num_boost_round,
                            evals=evals,
                            obj=obj, feval=feval,
-                           xgb_model=xgb_model, callbacks=callbacks)
+                           xgb_model=xgb_model, callbacks=callbacks, eval_period=int(verbose_eval))
 
 
 class CVPack(object):
